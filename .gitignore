@@ -1,0 +1,11 @@
+build/
+dist/
+installer/Output/
+__pycache__/
+*.spec
+*.log
+dock_config.json
+dock_prefs.json
+barra_backup.json
+icones_store/
+icon_preview.png
