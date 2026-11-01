@@ -9,6 +9,9 @@ import hashlib
 import json
 import os
 import re
+import ssl
+import subprocess
+import sys
 import urllib.request
 
 API_PADRAO = "https://api.github.com"
@@ -26,6 +29,31 @@ def _abrir(url, timeout):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def _curl(args, timeout):
+    """Reserva: o curl.exe do Windows 10/11 usa o armazenamento de certificados do proprio Windows
+    (o Python embutido as vezes nao confia na cadeia de certificados do PC: antivirus, rede da empresa...)."""
+    flags = 0x08000000 if sys.platform == "win32" else 0        # CREATE_NO_WINDOW
+    base = ["curl.exe" if sys.platform == "win32" else "curl", "-sSL", "--ssl-no-revoke",
+            "--max-time", str(int(timeout)), "-A", USER_AGENT]
+    return subprocess.run(base + args, capture_output=True, creationflags=flags, timeout=timeout + 15)
+
+
+def _texto(url, timeout):
+    try:
+        with _abrir(url, timeout) as r:
+            return r.read().decode("utf-8", "ignore")
+    except Exception as e:
+        if not isinstance(getattr(e, "reason", e), ssl.SSLError) and "CERTIFICATE" not in str(e).upper():
+            raise
+        try:
+            p = _curl(["-H", "Accept: application/vnd.github+json", "--fail", url], timeout)
+        except Exception:
+            raise e
+        if p.returncode != 0:
+            raise RuntimeError(f"{e} | curl: {p.stderr.decode('utf-8', 'ignore').strip()[:200]}")
+        return p.stdout.decode("utf-8", "ignore")
+
+
 def verificar(repo, versao_atual, api_base=API_PADRAO, timeout=10):
     """Pergunta ao GitHub pela ultima versao publicada.
 
@@ -37,8 +65,7 @@ def verificar(repo, versao_atual, api_base=API_PADRAO, timeout=10):
     if not repo or "/" not in repo:
         return {"status": "erro", "msg": "GITHUB_REPO nao configurado no dock.py"}
     try:
-        with _abrir(f"{api_base}/repos/{repo}/releases/latest", timeout) as r:
-            d = json.load(r)
+        d = json.loads(_texto(f"{api_base}/repos/{repo}/releases/latest", timeout))
     except Exception as e:
         return {"status": "erro", "msg": f"Nao consegui falar com o GitHub: {e}"}
 
@@ -70,22 +97,32 @@ def baixar(url, destino, sha_url=None, timeout=60, progresso=None):
     os.makedirs(os.path.dirname(destino), exist_ok=True)
     esperado = None
     if sha_url:
-        with _abrir(sha_url, timeout) as r:
-            esperado = r.read().decode("utf-8", "ignore").split()[0].strip().lower()
+        esperado = _texto(sha_url, timeout).split()[0].strip().lower()
     h = hashlib.sha256()
     tmp = destino + ".parte"
-    with _abrir(url, timeout) as r, open(tmp, "wb") as f:
-        total = int(r.headers.get("Content-Length") or 0)
-        lido = 0
-        while True:
-            bloco = r.read(1024 * 256)
-            if not bloco:
-                break
-            f.write(bloco)
-            h.update(bloco)
-            lido += len(bloco)
-            if progresso and total:
-                progresso(lido / total)
+    try:
+        with _abrir(url, timeout) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            lido = 0
+            while True:
+                bloco = r.read(1024 * 256)
+                if not bloco:
+                    break
+                f.write(bloco)
+                h.update(bloco)
+                lido += len(bloco)
+                if progresso and total:
+                    progresso(lido / total)
+    except Exception as e:
+        if not isinstance(getattr(e, "reason", e), ssl.SSLError) and "CERTIFICATE" not in str(e).upper():
+            raise
+        p = _curl(["--fail", "-o", tmp, url], max(timeout, 600))
+        if p.returncode != 0:
+            raise RuntimeError(f"{e} | curl: {p.stderr.decode('utf-8', 'ignore').strip()[:200]}")
+        h = hashlib.sha256()
+        with open(tmp, "rb") as f:
+            for bloco in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(bloco)
     if esperado and h.hexdigest().lower() != esperado:
         os.remove(tmp)
         raise ValueError("O arquivo baixado esta corrompido (hash SHA-256 diferente do esperado).")
