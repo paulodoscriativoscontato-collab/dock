@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.5"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.6"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -1996,6 +1996,7 @@ class PainelPreferencias(QWidget):
         self.lay.setContentsMargins(26, 22, 26, 26)
         self.lay.setSpacing(0)
         self._construir()
+        self.atualizar_upd()
         self.restilizar()
 
     # ---------- blocos de interface ----------
@@ -2040,6 +2041,18 @@ class PainelPreferencias(QWidget):
                 v.addWidget(cont)
             v.addWidget(linha)
         self.lay.addWidget(f)
+
+    def _clicou_upd(self):
+        if self.dock.aviso_versao():
+            self.dock.baixar_e_instalar(manual=True)
+        else:
+            self.dock.verificar_atualizacao(manual=True)
+
+    def atualizar_upd(self):
+        r = self.dock.raiz()
+        self.lbl_upd.setText(r._upd_status)
+        v = r.aviso_versao()
+        self.b_upd.setText(f"Atualizar para {v}" if v else "Verificar agora")
 
     def _mudou(self, chave, valor):
         self.dock.definir_pref(chave, valor, persistir=False)
@@ -2171,10 +2184,17 @@ class PainelPreferencias(QWidget):
         ])
 
         self._secao("Atualizações")
-        b_upd = QPushButton("Verificar agora")
-        b_upd.clicked.connect(lambda: self.dock.verificar_atualizacao(manual=True))
+        self.b_upd = QPushButton("Verificar agora")
+        self.b_upd.clicked.connect(self._clicou_upd)
+        self.lbl_upd = QLabel("")
+        self.lbl_upd.setWordWrap(True)
+        self.lbl_upd.setMaximumWidth(260)
+        self.lbl_upd.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.lbl_upd.setObjectName("dica")
+        b_upd = self.b_upd
         self._cartao([
             self._linha("Versão instalada", QLabel(VERSAO)),
+            self._linha("Situação", self.lbl_upd),
             self._linha("Atualizar automaticamente", self._sw("atualizar_auto"),
                         "Baixa e instala as novidades sozinha, em segundo plano"),
             self._linha("Procurar atualizações", b_upd),
@@ -2328,9 +2348,11 @@ class Dock(QWidget):
         self._upd_busy = False
         self._upd_manual = False
         self._upd_nova = None       # ultima versao nova encontrada
+        self._aviso_antes = None
         self._dl_res = None
         self._dl_busy = False
-        self._upd_prox = time.monotonic() + 45
+        self._upd_prox = time.time() + 45
+        self._upd_status = "Ainda não verificado nesta sessão."
         self._montar_local()
         self.previa = Previa(self)
         self.pilha = Pilha(self)
@@ -2385,16 +2407,36 @@ class Dock(QWidget):
             res, self._dl_res = self._dl_res, None
             self._dl_busy = False
             self._tratar_download(res)
-        if agora >= self._upd_prox:
-            self._upd_prox = agora + 6 * 3600          # confere de novo a cada 6 horas
+        if time.time() >= self._upd_prox:
+            self._upd_prox = time.time() + 3600        # confere de novo a cada hora (e logo ao acordar o PC)
             if PREFS["atualizar_auto"] and GITHUB_REPO:
                 self.verificar_atualizacao()
+
+    def aviso_versao(self):
+        """Versao nova esperando para ser instalada (None se nao ha). Usado pela bolinha da engrenagem."""
+        r = self.raiz()
+        if r._upd_nova and not r._dl_busy:
+            return r._upd_nova.get("versao")
+        return None
+
+    def _definir_status_upd(self, texto):
+        r = self.raiz()
+        r._upd_status = time.strftime("%H:%M  ") + texto
+        antes = r._aviso_antes
+        r._aviso_antes = r.aviso_versao()
+        if r._aviso_antes != antes:
+            r.montar()                  # mostra/esconde a engrenagem e a bolinha de aviso
+        for d in r.todas():
+            d.update()
+        if r.painel_prefs is not None:
+            r.painel_prefs.atualizar_upd()
 
     def _tratar_verificacao(self, res):
         manual, self._upd_manual = self._upd_manual, False
         st = res.get("status")
         if st == "nova":
             self._upd_nova = res
+            self._definir_status_upd(f"Versão {res['versao']} disponível.")
             if manual:
                 notas = res.get("notas") or ""
                 resp = QMessageBox.question(None, "Dock", f"Existe uma versão nova: {res['versao']} "
@@ -2404,13 +2446,17 @@ class Dock(QWidget):
                     self.baixar_e_instalar(manual=True)
             elif PREFS["atualizar_auto"]:
                 self.baixar_e_instalar()
-        elif manual:
-            if st == "atual":
+        elif st == "atual":
+            self._upd_nova = None
+            self._definir_status_upd(f"Você está na versão mais recente ({VERSAO}).")
+            if manual:
                 QMessageBox.information(None, "Dock", f"Você já está na versão mais recente ({VERSAO}).")
-            else:
-                QMessageBox.warning(None, "Dock", res.get("msg", "Não consegui verificar as atualizações."))
+        elif manual:
+            self._definir_status_upd("Erro: " + str(res.get("msg", "não consegui verificar.")))
+            QMessageBox.warning(None, "Dock", res.get("msg", "Não consegui verificar as atualizações."))
         elif st == "erro":
             self._log_prefs("atualizacao: " + str(res.get("msg")))
+            self._definir_status_upd("Erro: " + str(res.get("msg")))
 
     def baixar_e_instalar(self, manual=False):
         res = self._upd_nova
@@ -2435,6 +2481,7 @@ class Dock(QWidget):
     def _tratar_download(self, res):
         if not res.get("ok"):
             self._log_prefs("atualizacao: download falhou: " + str(res.get("msg")))
+            self._definir_status_upd("Não consegui baixar a atualização: " + str(res.get("msg")))
             return
         try:
             # instalador silencioso: fecha esta dock, troca os arquivos e abre a nova versao
@@ -2548,7 +2595,7 @@ class Dock(QWidget):
             self.items.append(novo("temp", t["chave"], t["caminho"], t["nome"], pix_para(t["caminho"])))
         # itens de sistema, na ordem escolhida pelo usuario (arrastando) e salva nas preferencias
         sis = {
-            "prefs": (PREFS["engrenagem"], "::prefs", "Preferências", icone_engrenagem()),
+            "prefs": (PREFS["engrenagem"] or bool(self.aviso_versao()), "::prefs", "Preferências", icone_engrenagem()),
             "lixeira": (PREFS["lixeira"], "::lixeira", "Lixeira", icone_lixeira(self.lixeira_cheia)),
             "painel": (PREFS["painel"], "::painel", "Painel rápido", None),
             "relogio": (PREFS["relogio"], "::relogio", "Relógio", None),
@@ -3408,6 +3455,8 @@ class Dock(QWidget):
     # ---------- desenho ----------
     def texto_etiqueta(self, it):
         tipo = it["tipo"]
+        if tipo == "prefs" and self.aviso_versao():
+            return f"Preferências  ·  atualização {self.aviso_versao()} disponível"
         if tipo == "relogio":
             return QDate.currentDate().toString("dddd, d 'de' MMMM")
         if tipo == "painel":
@@ -3571,6 +3620,12 @@ class Dock(QWidget):
                 p.setPen(QColor(255, 255, 255))
                 p.drawText(alvo, Qt.AlignCenter, (it["nome"][:1] or "?").upper())
             p.setOpacity(1.0)
+
+            if it["tipo"] == "prefs" and self.aviso_versao():
+                canto = QPointF(alvo.right() - 3, alvo.top() + 3)
+                p.setPen(QPen(QColor(255, 255, 255, 235), 1.6))
+                p.setBrush(QColor(10, 132, 255))
+                p.drawEllipse(canto, max(4.0, s * 0.11), max(4.0, s * 0.11))
 
             if it["janelas"] and PREFS["bolinhas"]:   # bolinha de "app aberto"
                 p.setPen(Qt.NoPen)
