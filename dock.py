@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.3"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.4"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -118,7 +118,7 @@ provider = None
 PREFS_PADRAO = {
     "tema": "escuro",                # escuro | claro | auto (segue o Windows)
     "vidro": True,                   # desfoque atras da dock
-    "vidro_modo": "cantos_pequenos",  # cantos_pequenos | acrilico | simples
+    "vidro_modo": "desfoque",  # desfoque | cantos_pequenos | acrilico | simples
     "vidro_opacidade": 20,           # 0 (transparente) a 100 (solido)
     "borda_pct": 100,                # intensidade da borda clara do vidro (0 a 150)
     "animacao_pct": 100,             # velocidade das animacoes (50 a 200)
@@ -744,12 +744,12 @@ def esvaziar_lixeira():
 
 
 # ---------- vidro (desfoque atras da dock) ----------
-def ativar_desfoque(hwnd, tint=(255, 255, 255), alpha=60):
+def ativar_desfoque(hwnd, tint=(255, 255, 255), alpha=60, simples=False):
     """Acrilico atras da janela. 'tint' e a cor e 'alpha' (0-255) o quanto ela cobre o desfoque."""
     try:
         r, g, b = tint
         cor = ((int(alpha) & 0xFF) << 24) | (b << 16) | (g << 8) | r      # formato AABBGGRR
-        accent = ACCENT_POLICY(4, 0, cor, 0)                              # ACCENT_ENABLE_ACRYLICBLURBEHIND
+        accent = ACCENT_POLICY(3 if simples else 4, 0, cor, 0)           # 3 = BLURBEHIND (respeita o recorte); 4 = ACRYLIC
         dados = WINCOMPATTRDATA(19, ctypes.cast(ctypes.pointer(accent), ctypes.c_void_p),
                                 ctypes.sizeof(accent))
         user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(dados))
@@ -763,13 +763,13 @@ RAIO_DWM = 8   # raio fixo dos cantos que o proprio Windows 11 aplica a janela
 def raio_efetivo():
     """Com desfoque do Windows, o acrilico ignora o recorte da janela; o jeito de ter cantos
     arredondados de verdade e usar o arredondamento do proprio Windows (raio pequeno e fixo)."""
-    if PREFS["vidro"] and PREFS.get("vidro_modo", "cantos_pequenos") == "cantos_pequenos":
+    if PREFS["vidro"] and PREFS.get("vidro_modo", "desfoque") == "cantos_pequenos":
         return RAIO_DWM
     return RAIO
 
 
 def vidro_com_desfoque():
-    return bool(PREFS["vidro"]) and PREFS.get("vidro_modo", "cantos_pequenos") != "simples"
+    return bool(PREFS["vidro"]) and PREFS.get("vidro_modo", "desfoque") != "simples"
 
 
 def cantos_dwm(hwnd, ligar):
@@ -1592,7 +1592,9 @@ class Vidro(QWidget):
     def aplicar_cor(self):
         hwnd = int(self.winId())
         cantos_dwm(hwnd, PREFS.get("vidro_modo") == "cantos_pequenos")
-        ativar_desfoque(hwnd, tema_atual()["tint"], alpha_vidro())
+        ativar_desfoque(hwnd, tema_atual()["tint"], alpha_vidro(),
+                        simples=PREFS.get("vidro_modo", "desfoque") == "desfoque")
+        self.update()
 
     def atualizar_estilo(self):
         """Chamado quando muda tema, transparencia ou cantos."""
@@ -1609,6 +1611,13 @@ class Vidro(QWidget):
         p = QPainter(self)
         p.setCompositionMode(QPainter.CompositionMode_Source)
         p.fillRect(self.rect(), Qt.transparent)
+        if PREFS.get("vidro_modo", "desfoque") == "desfoque":
+            # o desfoque simples nao tem cor propria: a cor do vidro e desenhada aqui, ja arredondada
+            r_, g_, b_ = tema_atual()["tint"]
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(r_, g_, b_, max(1, min(255, alpha_vidro()))))
+            p.drawRoundedRect(QRectF(self.rect()), RAIO, RAIO)
 
 
 # ---------- pilha: conteudo recente de uma pasta ----------
@@ -2093,10 +2102,11 @@ class PainelPreferencias(QWidget):
                         "Automático segue o tema do Windows"),
             self._linha("Efeito de vidro", self._sw("vidro"), "Desfoca o que está atrás da dock"),
             self._linha("Tipo de vidro", self._lista("vidro_modo", [
+                ("desfoque", "Desfoque (cantos grandes)"),
                 ("cantos_pequenos", "Desfoque (cantos pequenos)"),
-                ("acrilico", "Desfoque (cantos grandes, pode vazar)"),
+                ("acrilico", "Acrílico (cantos grandes, pode vazar)"),
                 ("simples", "Sem desfoque (cantos grandes)")]),
-                "Se o desfoque vazar dos cantos, use um dos outros tipos"),
+                "Se algum tipo vazar dos cantos, teste outro"),
             self._linha("Estilo do vidro", self.seg_preset,
                         "Combinações prontas de transparência e borda"),
             self._linha("Opacidade do vidro", self._sl("vidro_opacidade", 0, 100, " %"),
