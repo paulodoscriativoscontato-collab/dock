@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.0"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.1"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -311,8 +311,13 @@ user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintyp
 user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
 user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.SetWindowRgn.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.BOOL]
+user32.GetWindowRgn.argtypes = [wintypes.HWND, wintypes.HANDLE]
+user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 gdi32.CreateRoundRectRgn.argtypes = [ctypes.c_int] * 6
 gdi32.CreateRoundRectRgn.restype = wintypes.HANDLE
+gdi32.CreateRectRgn.argtypes = [ctypes.c_int] * 4
+gdi32.CreateRectRgn.restype = wintypes.HANDLE
+gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
 kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -757,13 +762,34 @@ def alpha_vidro():
     return max(1, int(255 * (v ** 1.6)))
 
 
+_logs_regiao = 0
+
+
 def definir_regiao(hwnd, w, h, raio, dpr):
+    """Recorta a janela de vidro em retangulo arredondado. Usa o tamanho REAL da janela em pixels
+    (GetClientRect); w/h/dpr so servem de reserva se isso falhar."""
+    global _logs_regiao
     try:
-        rgn = gdi32.CreateRoundRectRgn(0, 0, int(w * dpr) + 1, int(h * dpr) + 1,
-                                       int(raio * 2 * dpr), int(raio * 2 * dpr))
-        user32.SetWindowRgn(hwnd, rgn, True)
+        r = wintypes.RECT()
+        if user32.GetClientRect(hwnd, ctypes.byref(r)) and r.right > 0 and r.bottom > 0:
+            wpx, hpx = r.right - r.left, r.bottom - r.top
+        else:
+            wpx, hpx = int(w * dpr), int(h * dpr)
+        rgn = gdi32.CreateRoundRectRgn(0, 0, wpx + 1, hpx + 1, int(raio * 2 * dpr), int(raio * 2 * dpr))
+        ok = user32.SetWindowRgn(hwnd, rgn, True)
+        if _logs_regiao < 6:                      # diagnostico: o Windows aceitou o recorte?
+            _logs_regiao += 1
+            tmp = gdi32.CreateRectRgn(0, 0, 0, 0)
+            tipo = user32.GetWindowRgn(hwnd, tmp)  # 0 = sem recorte, 1-3 = tem recorte
+            gdi32.DeleteObject(tmp)
+            try:
+                with open(os.path.join(DADOS, "prefs_debug.log"), "a", encoding="utf-8") as f:
+                    f.write(f"{time.strftime('%H:%M:%S')} vidro: regiao {wpx}x{hpx} raio={raio} dpr={dpr} "
+                            f"SetWindowRgn={ok} GetWindowRgn={tipo}\n")
+            except Exception:
+                pass
     except Exception:
-        pass
+        _registrar_erro(*sys.exc_info())
 
 
 # ---------- iniciar com o Windows (por app) ----------
@@ -1515,6 +1541,12 @@ class Vidro(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self._tam = (0, 0)
+        # reaplica recorte + vidro quando o tamanho para de mudar (o Windows as vezes perde o recorte
+        # enquanto a janela esta sendo redimensionada a cada quadro da animacao)
+        self._deb = QTimer(self)
+        self._deb.setSingleShot(True)
+        self._deb.setInterval(90)
+        self._deb.timeout.connect(self._reforcar)
 
     def ajustar(self, x, y, w, h):
         self.setGeometry(x, y, w, h)
@@ -1522,6 +1554,12 @@ class Vidro(QWidget):
             self._tam = (w, h)
             if self.isVisible():
                 self._regiao()
+                self._deb.start()
+
+    def _reforcar(self):
+        if self.isVisible():
+            self._regiao()
+            self.aplicar_cor()
 
     def _regiao(self):
         definir_regiao(int(self.winId()), self.width(), self.height(), RAIO, self.devicePixelRatioF())
