@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.1"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.2"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -118,6 +118,7 @@ provider = None
 PREFS_PADRAO = {
     "tema": "escuro",                # escuro | claro | auto (segue o Windows)
     "vidro": True,                   # desfoque atras da dock
+    "vidro_modo": "cantos_pequenos",  # cantos_pequenos | acrilico | simples
     "vidro_opacidade": 20,           # 0 (transparente) a 100 (solido)
     "borda_pct": 100,                # intensidade da borda clara do vidro (0 a 150)
     "animacao_pct": 100,             # velocidade das animacoes (50 a 200)
@@ -752,6 +753,30 @@ def ativar_desfoque(hwnd, tint=(255, 255, 255), alpha=60):
         dados = WINCOMPATTRDATA(19, ctypes.cast(ctypes.pointer(accent), ctypes.c_void_p),
                                 ctypes.sizeof(accent))
         user32.SetWindowCompositionAttribute(hwnd, ctypes.byref(dados))
+    except Exception:
+        pass
+
+
+RAIO_DWM = 8   # raio fixo dos cantos que o proprio Windows 11 aplica a janela
+
+
+def raio_efetivo():
+    """Com desfoque do Windows, o acrilico ignora o recorte da janela; o jeito de ter cantos
+    arredondados de verdade e usar o arredondamento do proprio Windows (raio pequeno e fixo)."""
+    if PREFS["vidro"] and PREFS.get("vidro_modo", "cantos_pequenos") == "cantos_pequenos":
+        return RAIO_DWM
+    return RAIO
+
+
+def vidro_com_desfoque():
+    return bool(PREFS["vidro"]) and PREFS.get("vidro_modo", "cantos_pequenos") != "simples"
+
+
+def cantos_dwm(hwnd, ligar):
+    """Windows 11: DWMWCP_ROUND (2) arredonda a janela inclusive o acrilico; 1 = sem arredondar."""
+    try:
+        pref = ctypes.c_int(2 if ligar else 1)
+        dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
     except Exception:
         pass
 
@@ -1562,10 +1587,12 @@ class Vidro(QWidget):
             self.aplicar_cor()
 
     def _regiao(self):
-        definir_regiao(int(self.winId()), self.width(), self.height(), RAIO, self.devicePixelRatioF())
+        definir_regiao(int(self.winId()), self.width(), self.height(), raio_efetivo(), self.devicePixelRatioF())
 
     def aplicar_cor(self):
-        ativar_desfoque(int(self.winId()), tema_atual()["tint"], alpha_vidro())
+        hwnd = int(self.winId())
+        cantos_dwm(hwnd, PREFS.get("vidro_modo") == "cantos_pequenos")
+        ativar_desfoque(hwnd, tema_atual()["tint"], alpha_vidro())
 
     def atualizar_estilo(self):
         """Chamado quando muda tema, transparencia ou cantos."""
@@ -2065,6 +2092,11 @@ class PainelPreferencias(QWidget):
             self._linha("Tema", self._seg("tema", [("auto", "Automático"), ("claro", "Claro"), ("escuro", "Escuro")]),
                         "Automático segue o tema do Windows"),
             self._linha("Efeito de vidro", self._sw("vidro"), "Desfoca o que está atrás da dock"),
+            self._linha("Tipo de vidro", self._lista("vidro_modo", [
+                ("cantos_pequenos", "Desfoque (cantos pequenos)"),
+                ("acrilico", "Desfoque (cantos grandes, pode vazar)"),
+                ("simples", "Sem desfoque (cantos grandes)")]),
+                "Se o desfoque vazar dos cantos, use um dos outros tipos"),
             self._linha("Estilo do vidro", self.seg_preset,
                         "Combinações prontas de transparência e borda"),
             self._linha("Opacidade do vidro", self._sl("vidro_opacidade", 0, 100, " %"),
@@ -2600,7 +2632,7 @@ class Dock(QWidget):
     def atualizar_vidro_visivel(self):
         if self.vidro is None:
             return
-        quer = bool(PREFS["vidro"]) and self.oculto < 0.98
+        quer = vidro_com_desfoque() and self.oculto < 0.98
         if quer != self._vidro_vis:
             self._vidro_vis = quer
             if quer:
@@ -3409,14 +3441,15 @@ class Dock(QWidget):
         T = tema_atual()
         pill = QRectF(self.pill_x, TIP_H, self.pill_w, PILL_H)
         p.setPen(QPen(cor_borda(), 1.5))
-        if PREFS["vidro"]:
+        if vidro_com_desfoque():
             # o fundo fica por conta da janela de vidro. Mas pixels 100% transparentes deixam o clique
             # atravessar a dock (o menu do botao direito viraria o do programa de tras); alpha 1 pega o clique.
             p.setBrush(QColor(0, 0, 0, 1))
         else:
             r_, g_, b_ = T["tint"]
             p.setBrush(QColor(r_, g_, b_, min(255, 20 + int(PREFS["vidro_opacidade"] * 2.0))))
-        p.drawRoundedRect(pill.adjusted(0.75, 0.75, -0.75, -0.75), RAIO, RAIO)
+        rr = raio_efetivo()
+        p.drawRoundedRect(pill.adjusted(0.75, 0.75, -0.75, -0.75), rr, rr)
 
         # divisorias discretas: depois do Iniciar, antes dos apps abertos e antes dos itens do sistema
         n_temp = len(self.temporarios)
