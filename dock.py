@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.7"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.8"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -136,7 +136,8 @@ PREFS_PADRAO = {
     "etiquetas": True,               # nome ao passar o mouse
     "engrenagem": True,              # engrenagem que abre as Preferencias
     "todas_telas": True,             # uma dock em cada monitor
-    "atualizar_auto": True,          # baixa e instala atualizacoes sozinha
+    "atualizar_auto": True,
+    "confirmar_energia": True,       # pergunta antes de reiniciar / desligar / encerrar sessao          # baixa e instala atualizacoes sozinha
     "ordem_sistema": ["prefs", "lixeira", "painel", "relogio"],   # ordem dos itens de sistema (arraste na dock)
     "lixeira": True,
     "painel": True,
@@ -686,6 +687,42 @@ def enviar_win(tecla=None):
 
 def abrir_menu_iniciar():
     enviar_win()
+
+
+def _executar_oculto(args):
+    try:
+        subprocess.Popen(args, creationflags=0x08000000, close_fds=True)     # CREATE_NO_WINDOW
+    except Exception as e:
+        print(f"Erro ao executar {args}: {e}")
+
+
+def suspender_pc():
+    """Suspende (dormir). bHibernate=False garante suspender e nao hibernar."""
+    try:
+        powrprof = ctypes.WinDLL("powrprof")
+        powrprof.SetSuspendState.argtypes = [wintypes.BOOL, wintypes.BOOL, wintypes.BOOL]
+        powrprof.SetSuspendState(False, False, False)
+    except Exception as e:
+        print(f"Erro ao suspender: {e}")
+
+
+def reiniciar_pc():
+    _executar_oculto(["shutdown", "/r", "/t", "0"])
+
+
+def desligar_pc():
+    _executar_oculto(["shutdown", "/s", "/t", "0"])
+
+
+def encerrar_sessao():
+    _executar_oculto(["shutdown", "/l"])
+
+
+def bloquear_pc():
+    try:
+        user32.LockWorkStation()
+    except Exception as e:
+        print(f"Erro ao bloquear: {e}")
 
 
 def abrir_painel_rapido():
@@ -2179,6 +2216,8 @@ class PainelPreferencias(QWidget):
         self.sw_inicio.alterado.connect(definir_inicio_dock)
         self._cartao([
             self._linha("Abrir a dock ao ligar o Windows", self.sw_inicio),
+            self._linha("Confirmar antes de desligar", self._sw("confirmar_energia"),
+                        "Reiniciar, desligar e encerrar sessão (botão direito no ícone do Windows)"),
             self._linha("Esconder a barra de tarefas do Windows", self._sw("ocultar_barra"),
                         "Só no monitor principal"),
         ])
@@ -3354,6 +3393,17 @@ class Dock(QWidget):
         finally:
             self.menu_aberto = False
 
+    def acao_energia(self, titulo, texto, fn):
+        """Reiniciar / desligar / encerrar sessao, com confirmacao (desligavel nas Preferencias)."""
+        if PREFS["confirmar_energia"]:
+            caixa = QMessageBox(QMessageBox.Icon.Question, titulo, texto,
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            caixa.setDefaultButton(QMessageBox.StandardButton.No)
+            caixa.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            if caixa.exec() != QMessageBox.StandardButton.Yes:
+                return
+        fn()
+
     def _menu_contexto(self, event):
         self.previa.esconder()
         idx = self.indice_em(event.pos())
@@ -3369,6 +3419,18 @@ class Dock(QWidget):
                 a.setChecked(bool(marcado))
             acoes[a] = fn
             return a
+
+        if tipo == "inicio":
+            add(menu, "Suspender", suspender_pc)
+            add(menu, "Reiniciar", lambda: self.acao_energia(
+                "Reiniciar", "Reiniciar o computador agora?\nSalve o que estiver aberto.", reiniciar_pc))
+            add(menu, "Desligar", lambda: self.acao_energia(
+                "Desligar", "Desligar o computador agora?\nSalve o que estiver aberto.", desligar_pc))
+            menu.addSeparator()
+            add(menu, "Bloquear", bloquear_pc)
+            add(menu, "Encerrar sessão", lambda: self.acao_energia(
+                "Encerrar sessão", "Encerrar a sessão do Windows agora?", encerrar_sessao))
+            menu.addSeparator()
 
         if tipo in ("fixo", "temp"):
             fm = QFontMetrics(menu.font())
