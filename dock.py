@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.6"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.7"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -2891,7 +2891,9 @@ class Dock(QWidget):
             return (0, 0, 0, 0)
         dpr = self.devicePixelRatioF()
         esq = r.left + int(self.pill_x * dpr)
-        topo = r.top + int(TIP_H * dpr)
+        # SEMPRE a posicao de repouso (dock visivel), nao a atual: senao, ao descer para se esconder, ela
+        # deixa de ficar "coberta" pela janela, sobe de novo e fica saltitando sem parar.
+        topo = r.top + int((TIP_H + (self.y_vis - self.y())) * dpr)
         return (esq, topo, esq + int(self.pill_w * dpr), topo + int(PILL_H * dpr))
 
     def atualizar_autohide(self, agora):
