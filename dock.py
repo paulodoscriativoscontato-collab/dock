@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.8"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.9"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -308,6 +308,8 @@ user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.FindWindowW.restype = wintypes.HWND
+user32.FindWindowExW.argtypes = [wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR]
+user32.FindWindowExW.restype = wintypes.HWND
 user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
 user32.MonitorFromWindow.restype = wintypes.HANDLE
 user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
@@ -514,7 +516,7 @@ def deve_esconder_dock(dock_rect, dock_hwnd):
         return False
 
 
-# ---------- barra de tarefas do Windows (monitor principal) ----------
+# ---------- barra de tarefas do Windows (todos os monitores) ----------
 ARQ_BARRA = os.path.join(DADOS, "barra_backup.json")
 _barra_ativa = False
 
@@ -534,8 +536,24 @@ def _definir_estado_barra(hwnd, estado):
     shell32.SHAppBarMessage(0xA, ctypes.byref(abd))                # ABM_SETSTATE
 
 
+def janelas_da_barra():
+    """A barra do monitor principal (Shell_TrayWnd) e as dos outros monitores (Shell_SecondaryTrayWnd)."""
+    achadas = []
+    h = user32.FindWindowW("Shell_TrayWnd", None)
+    if h:
+        achadas.append(h)
+    anterior = None
+    for _ in range(16):
+        h = user32.FindWindowExW(None, anterior, "Shell_SecondaryTrayWnd", None)
+        if not h:
+            break
+        achadas.append(h)
+        anterior = h
+    return achadas
+
+
 def esconder_barra():
-    """Tira a barra do monitor principal (Shell_TrayWnd). A dos outros monitores nao e escondida."""
+    """Tira a barra de tarefas do Windows de TODOS os monitores."""
     global _barra_ativa
     hwnd = user32.FindWindowW("Shell_TrayWnd", None)
     if not hwnd:
@@ -557,9 +575,9 @@ def manter_barra():
     """Se o Windows mostrar a barra de novo (mouse na borda, Iniciar...), esconde na hora."""
     if not _barra_ativa:
         return
-    hwnd = user32.FindWindowW("Shell_TrayWnd", None)
-    if hwnd and user32.IsWindowVisible(hwnd):
-        user32.ShowWindow(hwnd, 0)                     # SW_HIDE
+    for h in janelas_da_barra():
+        if user32.IsWindowVisible(h):
+            user32.ShowWindow(h, 0)                    # SW_HIDE
 
 
 def restaurar_barra(forcar=False):
@@ -568,8 +586,8 @@ def restaurar_barra(forcar=False):
     if not _barra_ativa and not forcar:
         return
     hwnd = user32.FindWindowW("Shell_TrayWnd", None)
-    if hwnd:
-        user32.ShowWindow(hwnd, 5)                     # SW_SHOW
+    for h in janelas_da_barra():
+        user32.ShowWindow(h, 5)                        # SW_SHOW
     try:
         with open(ARQ_BARRA, "r", encoding="utf-8") as f:
             estado = int(json.load(f)["estado"])
@@ -2219,7 +2237,7 @@ class PainelPreferencias(QWidget):
             self._linha("Confirmar antes de desligar", self._sw("confirmar_energia"),
                         "Reiniciar, desligar e encerrar sessão (botão direito no ícone do Windows)"),
             self._linha("Esconder a barra de tarefas do Windows", self._sw("ocultar_barra"),
-                        "Só no monitor principal"),
+                        "Em todos os monitores"),
         ])
 
         self._secao("Atualizações")
@@ -2597,7 +2615,9 @@ class Dock(QWidget):
 
     def tela_util(self):
         s = self.tela
-        return s.geometry() if (_barra_ativa and self.mestre is None) else s.availableGeometry()
+        # com a barra do Windows escondida em todos os monitores, todas as docks usam a tela inteira:
+        # assim a distancia da borda e igual em qualquer monitor
+        return s.geometry() if _barra_ativa else s.availableGeometry()
 
     def montar(self):
         """Reconstroi a dock deste e de todos os monitores (apps fixados, ordem, preferencias...)."""
