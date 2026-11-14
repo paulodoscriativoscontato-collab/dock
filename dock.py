@@ -27,7 +27,7 @@ from PySide6.QtCore import (Qt, QTimer, QFileInfo, QSize, QRectF, QPointF, QRect
                             QPropertyAnimation, QEasingCurve, QAbstractNativeEventFilter,
                             QDate, QTime, Signal, QVariantAnimation)
 from PySide6.QtGui import (QGuiApplication, QPainter, QColor, QPen, QFont, QFontMetrics, QCursor,
-                           QPixmap, QLinearGradient, QBrush, QPolygonF, QImageReader,
+                           QPixmap, QImage, QLinearGradient, QBrush, QPolygonF, QImageReader,
                            QPainterPath, QTransform)
 
 # ---------- AJUSTES (pode mexer nestes valores) ----------
@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.10"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.11"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -1108,11 +1108,180 @@ def pegar_icone(caminho):
     return provider.icon(info)
 
 
-def pix_para(caminho):
-    if caminho not in CACHE_ICONES:
+class _ICONINFO(ctypes.Structure):
+    _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD), ("yHotspot", wintypes.DWORD),
+                ("hbmMask", ctypes.c_void_p), ("hbmColor", ctypes.c_void_p)]
+
+
+class _BITMAP(ctypes.Structure):
+    _fields_ = [("bmType", wintypes.LONG), ("bmWidth", wintypes.LONG), ("bmHeight", wintypes.LONG),
+                ("bmWidthBytes", wintypes.LONG), ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
+                ("bmBits", ctypes.c_void_p)]
+
+
+class _BMIH(ctypes.Structure):
+    _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD)]
+
+
+def _bits_do_bitmap(hdc, hbm, w, h):
+    bmi = _BMIH()
+    bmi.biSize = ctypes.sizeof(_BMIH)
+    bmi.biWidth, bmi.biHeight = w, -h            # negativo = de cima para baixo
+    bmi.biPlanes, bmi.biBitCount = 1, 32
+    buf = (ctypes.c_ubyte * (w * h * 4))()
+    gdi32.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT, wintypes.UINT,
+                                ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+    if not gdi32.GetDIBits(hdc, hbm, 0, h, buf, ctypes.byref(bmi), 0):
+        return None
+    return bytes(buf)
+
+
+def pix_de_hicon(hicon):
+    """HICON -> QPixmap (com transparencia), sem depender de QtWin."""
+    info = _ICONINFO()
+    user32.GetIconInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    if not user32.GetIconInfo(hicon, ctypes.byref(info)):
+        return None
+    hdc = None
+    try:
+        if not info.hbmColor:
+            return None
+        gdi32.GetObjectW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        bm = _BITMAP()
+        if not gdi32.GetObjectW(info.hbmColor, ctypes.sizeof(bm), ctypes.byref(bm)):
+            return None
+        w, h = int(bm.bmWidth), int(bm.bmHeight)
+        if w <= 0 or h <= 0 or w > 512 or h > 512:
+            return None
+        user32.GetDC.argtypes = [ctypes.c_void_p]
+        user32.GetDC.restype = ctypes.c_void_p
+        hdc = user32.GetDC(None)
+        cor = _bits_do_bitmap(hdc, info.hbmColor, w, h)
+        if not cor:
+            return None
+        dados = bytearray(cor)
+        if not any(dados[3::4]):                          # icone antigo, sem canal alfa: usa a mascara
+            mascara = _bits_do_bitmap(hdc, info.hbmMask, w, h) if info.hbmMask else None
+            for i in range(0, len(dados), 4):
+                transparente = bool(mascara) and mascara[i] > 127
+                dados[i + 3] = 0 if transparente else 255
+        img = QImage(bytes(dados), w, h, w * 4, QImage.Format_ARGB32).copy()
+        return QPixmap.fromImage(img)
+    except Exception:
+        return None
+    finally:
+        try:
+            gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+            if info.hbmColor:
+                gdi32.DeleteObject(info.hbmColor)
+            if info.hbmMask:
+                gdi32.DeleteObject(info.hbmMask)
+            if hdc:
+                user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+                user32.ReleaseDC(None, hdc)
+        except Exception:
+            pass
+
+
+def pix_da_janela(hwnd):
+    """O icone que o proprio app colocou na janela (funciona para quase todo app: Minecraft, Electron...)."""
+    try:
+        user32.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, ctypes.c_size_t, ctypes.c_ssize_t,
+                                               wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+        user32.SendMessageTimeoutW.restype = ctypes.c_ssize_t
+        user32.GetClassLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.GetClassLongPtrW.restype = ctypes.c_size_t
+        candidatos = []
+        for tipo in (1, 2, 0):                           # ICON_BIG, ICON_SMALL2, ICON_SMALL
+            res = ctypes.c_size_t(0)
+            if user32.SendMessageTimeoutW(hwnd, 0x007F, tipo, 0, 0x0002, 120, ctypes.byref(res)) and res.value:
+                candidatos.append(res.value)
+        for idx in (-14, -34):                           # GCLP_HICON, GCLP_HICONSM
+            v = user32.GetClassLongPtrW(hwnd, idx)
+            if v:
+                candidatos.append(v)
+        for h in candidatos:
+            pix = pix_de_hicon(h)
+            if pix is not None and not pix.isNull():
+                return pix
+    except Exception:
+        pass
+    return None
+
+
+def pix_msix(caminho):
+    """Apps da Microsoft Store / MSIX (WhatsApp, Claude, Minecraft Launcher...): o .exe fica em
+    ...\\WindowsApps\\<pacote>\\ e o Windows nao deixa ler o icone de dentro dele. Pega o logo do manifesto."""
+    try:
+        low = caminho.lower()
+        marca = "\\windowsapps\\"
+        i = low.find(marca)
+        if i < 0:
+            return None
+        resto = caminho[i + len(marca):]
+        pacote = resto.split("\\")[0]
+        pasta = caminho[:i + len(marca)] + pacote
+        rel_exe = resto[len(pacote) + 1:].replace("/", "\\").lower()
+        raiz = ET.parse(os.path.join(pasta, "AppxManifest.xml")).getroot()
+        escolhido = primeiro = None
+        for el in raiz.iter():
+            if el.tag.split("}")[-1] != "Application":
+                continue
+            primeiro = primeiro if primeiro is not None else el
+            if (el.get("Executable") or "").replace("/", "\\").lower() == rel_exe:
+                escolhido = el
+                break
+        el = escolhido if escolhido is not None else primeiro
+        if el is None:
+            return None
+        for ve in el.iter():
+            if ve.tag.split("}")[-1] == "VisualElements":
+                logo = ve.get("Square44x44Logo") or ve.get("Square150x150Logo")
+                png = montar_icone_store(pasta, logo, ve.get("BackgroundColor"), pacote + "|" + rel_exe)
+                if png:
+                    pix = QPixmap(png)
+                    return None if pix.isNull() else pix
+    except Exception:
+        pass
+    return None
+
+
+def pix_para(caminho, hwnd=None):
+    """Icone de um programa. Ordem: logo do pacote da Store (MSIX) -> icone do .exe -> icone da janela aberta.
+    'hwnd' (uma janela do app, se houver) permite o ultimo recurso, que cobre apps como o Minecraft."""
+    if caminho in CACHE_ICONES and (CACHE_ICONES[caminho] is not None or hwnd is None):
+        return CACHE_ICONES[caminho]
+    pix = None
+    try:
+        alvo = QFileInfo(caminho).symLinkTarget() if caminho and not caminho.lower().startswith("shell:") else ""
+    except Exception:
+        alvo = ""
+    msix = any("\\windowsapps\\" in (c or "").lower() for c in (caminho, alvo))
+    stem = os.path.splitext(os.path.basename(alvo or caminho))[0].lower()
+    if hwnd and stem in ("javaw", "java"):               # o icone do Java nao e o do jogo/app
+        pix = pix_da_janela(hwnd)
+    if pix is None and msix:
+        for c in (caminho, alvo):
+            if c and "\\windowsapps\\" in c.lower():
+                pix = pix_msix(c)
+                if pix is not None:
+                    break
+    if pix is None and hwnd and msix:
+        pix = pix_da_janela(hwnd)
+    if pix is None and not msix:
         icone = pegar_icone(caminho)
-        CACHE_ICONES[caminho] = None if icone.isNull() else icone.pixmap(QSize(128, 128))
-    return CACHE_ICONES[caminho]
+        pix = None if icone.isNull() else icone.pixmap(QSize(128, 128))
+        if pix is not None and pix.isNull():
+            pix = None
+    if pix is None and hwnd:
+        pix = pix_da_janela(hwnd)
+    if pix is not None or hwnd is None:
+        CACHE_ICONES[caminho] = pix
+    return pix
 
 
 def pix_item(d):
@@ -2705,7 +2874,8 @@ class Dock(QWidget):
                 it["pasta"] = pasta_do_item(d)
             self.items.append(it)
         for t in self.temporarios:
-            self.items.append(novo("temp", t["chave"], t["caminho"], t["nome"], pix_para(t["caminho"])))
+            self.items.append(novo("temp", t["chave"], t["caminho"], t["nome"],
+                                   pix_para(t["caminho"], t.get("hwnd"))))
         # itens de sistema, na ordem escolhida pelo usuario (arrastando) e salva nas preferencias
         sis = {
             "prefs": (PREFS["engrenagem"] or bool(self.aviso_versao()), "::prefs", "Preferências", icone_engrenagem()),
@@ -2863,6 +3033,8 @@ class Dock(QWidget):
         for it in self.items:
             if it["tipo"] == "fixo":
                 it["janelas"] = [j for j in self.janelas if janela_combina(j, it["exes"], it["nomes"])]
+                if it["pix"] is None and it["janelas"]:          # sem icone proprio: usa o da janela aberta
+                    it["pix"] = pix_da_janela(it["janelas"][0]["hwnd"])
             elif it["tipo"] == "temp":
                 it["janelas"] = [j for j in self.janelas if j["exe"] == it["chave"]]
             else:
@@ -2894,12 +3066,13 @@ class Dock(QWidget):
             if not PREFS["mostrar_abertos"] or self.combina_algum_fixo(j):
                 continue
             if j["exe"] not in por_exe:
-                por_exe[j["exe"]] = j["real"]
+                por_exe[j["exe"]] = (j["real"], j["hwnd"])
 
         antiga = [t["chave"] for t in self.temporarios]
         ordem = [e for e in antiga if e in por_exe] + [e for e in por_exe if e not in antiga]
         self.temporarios = [
-            {"chave": e, "caminho": por_exe[e], "nome": nome_bonito(por_exe[e])} for e in ordem
+            {"chave": e, "caminho": por_exe[e][0], "nome": nome_bonito(por_exe[e][0]), "hwnd": por_exe[e][1]}
+            for e in ordem
         ]
         if ordem != antiga:
             self.montar()
