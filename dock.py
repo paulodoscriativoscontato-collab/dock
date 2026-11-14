@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.9"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.10"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -705,6 +705,17 @@ def enviar_win(tecla=None):
 
 def abrir_menu_iniciar():
     enviar_win()
+
+
+def garantir_no_topo(hwnd):
+    """Reafirma 'sempre por cima' (sem roubar o foco). Apps em tela cheia podem passar na frente de janelas
+    que so ganharam o estado 'por cima' uma vez ao abrir."""
+    try:
+        user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user32.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # NOMOVE|NOSIZE|NOACTIVATE
+    except Exception:
+        pass
 
 
 def _executar_oculto(args):
@@ -2394,6 +2405,10 @@ class Dock(QWidget):
         self._etq_a = 0.0           # opacidade da etiqueta (0 a 1)
         self._geo_vidro = (0, 0)
         self._vidro_vis = False
+        self._rev_antes = False
+        self._fs_antes = False
+        self._t_topo = 0.0
+        self._caixas = []           # caixas de dialogo abertas (para nao serem recolhidas pelo Python)
         self._fundo = None          # fundo desfocado desenhado pela propria dock
         self._t_fundo = 0.0
         self._fundo_falhou = 0
@@ -2437,8 +2452,8 @@ class Dock(QWidget):
         r = self.raiz()
         if atualizador is None or not GITHUB_REPO:
             if manual:
-                QMessageBox.information(None, "Dock", "As atualizações ainda não foram configuradas "
-                                        "(GITHUB_REPO vazio no dock.py).")
+                self.mostrar_caixa(QMessageBox.Icon.Information, "Dock", "As atualizações ainda não foram "
+                                   "configuradas (GITHUB_REPO vazio no dock.py).")
             return
         if r._upd_busy:
             return
@@ -2476,6 +2491,39 @@ class Dock(QWidget):
             return r._upd_nova.get("versao")
         return None
 
+    def mostrar_caixa(self, icone, titulo, texto, botoes=None, ao_fechar=None):
+        """Caixa de aviso SEM laco modal aninhado (a dock continua rodando), arrastavel, sempre por cima
+        e com foco. Antes, a pergunta de atualizacao travava a dock e nao dava para mover a janela."""
+        botoes = botoes or QMessageBox.StandardButton.Ok
+        caixa = QMessageBox(icone, titulo, texto, botoes)
+        caixa.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
+                             | Qt.WindowStaysOnTopHint)
+        caixa.setWindowModality(Qt.NonModal)
+        caixa.setAttribute(Qt.WA_DeleteOnClose)
+        r = self.raiz()
+        r._caixas.append(caixa)
+
+        def terminou(resp):
+            if caixa in r._caixas:
+                r._caixas.remove(caixa)
+            if ao_fechar:
+                ao_fechar(resp)
+        caixa.finished.connect(terminou)
+        tela = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        caixa.adjustSize()
+        g = tela.availableGeometry()
+        caixa.move(g.center().x() - caixa.width() // 2, g.center().y() - caixa.height() // 2)
+        caixa.show()
+        caixa.raise_()
+        caixa.activateWindow()
+        try:
+            hwnd = int(caixa.winId())
+            trazer_janela(hwnd)
+            garantir_no_topo(hwnd)
+        except Exception:
+            pass
+        return caixa
+
     def _definir_status_upd(self, texto):
         r = self.raiz()
         r._upd_status = time.strftime("%H:%M  ") + texto
@@ -2496,21 +2544,26 @@ class Dock(QWidget):
             self._definir_status_upd(f"Versão {res['versao']} disponível.")
             if manual:
                 notas = res.get("notas") or ""
-                resp = QMessageBox.question(None, "Dock", f"Existe uma versão nova: {res['versao']} "
-                                            f"(você está na {VERSAO}).\n\n{notas}\n\nInstalar agora? "
-                                            "A dock fecha e abre sozinha em alguns segundos.")
-                if resp == QMessageBox.StandardButton.Yes:
-                    self.baixar_e_instalar(manual=True)
+                def resposta(resp):
+                    sim = QMessageBox.StandardButton.Yes
+                    if int(resp) == int(getattr(sim, "value", sim)):
+                        self.baixar_e_instalar(manual=True)
+                self.mostrar_caixa(QMessageBox.Icon.Question, "Dock",
+                                   f"Existe uma versão nova: {res['versao']} (você está na {VERSAO}).\n\n"
+                                   f"{notas}\n\nInstalar agora? A dock fecha e abre sozinha em alguns segundos.",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, resposta)
             elif PREFS["atualizar_auto"]:
                 self.baixar_e_instalar()
         elif st == "atual":
             self._upd_nova = None
             self._definir_status_upd(f"Você está na versão mais recente ({VERSAO}).")
             if manual:
-                QMessageBox.information(None, "Dock", f"Você já está na versão mais recente ({VERSAO}).")
+                self.mostrar_caixa(QMessageBox.Icon.Information, "Dock",
+                                   f"Você já está na versão mais recente ({VERSAO}).")
         elif manual:
             self._definir_status_upd("Erro: " + str(res.get("msg", "não consegui verificar.")))
-            QMessageBox.warning(None, "Dock", res.get("msg", "Não consegui verificar as atualizações."))
+            self.mostrar_caixa(QMessageBox.Icon.Warning, "Dock",
+                               res.get("msg", "Não consegui verificar as atualizações."))
         elif st == "erro":
             self._log_prefs("atualizacao: " + str(res.get("msg")))
             self._definir_status_upd("Erro: " + str(res.get("msg")))
@@ -2521,8 +2574,9 @@ class Dock(QWidget):
             return
         if not FROZEN:
             if manual:
-                QMessageBox.information(None, "Dock", "A atualização automática só funciona na dock instalada "
-                                        "(Dock-Setup.exe). Rodando pelo dock.py, atualize os arquivos você mesmo.")
+                self.mostrar_caixa(QMessageBox.Icon.Information, "Dock",
+                                   "A atualização automática só funciona na dock instalada (Dock-Setup.exe). "
+                                   "Rodando pelo dock.py, atualize os arquivos você mesmo.")
             return
         self._dl_busy = True
         destino = os.path.join(tempfile.gettempdir(), "DockUpdate", f"Dock-Setup-{res['versao']}.exe")
@@ -2993,6 +3047,22 @@ class Dock(QWidget):
                     self._t_borda = None
             alvo = 0.0 if self.revelada else 1.0
 
+        if self.tela_cheia != self._fs_antes:
+            self._fs_antes = self.tela_cheia
+            try:
+                fg = user32.GetForegroundWindow()
+                quem = f"{classe_da_janela(fg)} / {os.path.basename(exe_do_pid(pid_da_janela(fg)) or '?')}"
+            except Exception:
+                quem = "?"
+            self._log_prefs(f"autohide: janela pede esconder={self.tela_cheia} ({quem}) modo={OCULTAR_QUANDO}")
+        if self.tela_cheia and (self.revelada != self._rev_antes or (self.revelada and agora - self._t_topo > 0.4)):
+            self._t_topo = agora
+            if self.vidro is not None and self._vidro_vis:
+                garantir_no_topo(int(self.vidro.winId()))
+            garantir_no_topo(int(self.winId()))
+        if self.revelada != self._rev_antes:
+            self._rev_antes = self.revelada
+            self._log_prefs(f"autohide: revelada={self.revelada}")
         if alvo > self.oculto and self.previa.isVisible():
             self.previa.esconder()
         novo = self.oculto + (alvo - self.oculto) * 0.22
