@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.11"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.12"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -987,6 +987,26 @@ $lista = foreach ($a in $apps) {
     return [d for d in (dados or []) if d.get("Nome") and d.get("AUMID")]
 
 
+def _recortar_margens(img):
+    """Tira as margens transparentes do logo (o app deixa folga em volta; ela fazia o icone parecer pequeno)."""
+    try:
+        im = img.toImage().convertToFormat(QImage.Format_ARGB32)
+        w, h = im.width(), im.height()
+        alfa = bytes(im.constBits())[3::4]
+        if len(alfa) != w * h:
+            return img
+        linhas = [y for y in range(h) if any(alfa[y * w:(y + 1) * w])]
+        colunas = [x for x in range(w) if any(alfa[x::w])]
+        if not linhas or not colunas:
+            return img
+        y0, y1, x0, x1 = linhas[0], linhas[-1], colunas[0], colunas[-1]
+        if (x1 - x0 + 1) * (y1 - y0 + 1) < 0.2 * w * h:
+            return img
+        return QPixmap.fromImage(im.copy(x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+    except Exception:
+        return img
+
+
 def montar_icone_store(pasta, logo, cor, chave):
     if not logo:
         return None
@@ -998,6 +1018,8 @@ def montar_icone_store(pasta, logo, cor, chave):
                       if f.lower().startswith(stem) and f.lower().endswith(".png")]
     except Exception:
         return None
+    c = QColor(cor) if cor else QColor()
+    tem_cor = c.isValid() and c.alpha() > 0          # "transparent" ou sem cor = o app nao pede uma placa
     melhor, melhor_pts, sem_fundo = None, -1, False
     for f in candidatos:
         low = f.lower()
@@ -1007,7 +1029,8 @@ def montar_icone_store(pasta, logo, cor, chave):
         sz = QImageReader(caminho).size()
         if not sz.isValid():
             continue
-        pts = sz.width() + (500 if "altform-unplated" in low else 0)
+        # versao "unplated" (so o desenho, sem fundo) so vale se o app define uma cor para a placa
+        pts = sz.width() + (500 if ("altform-unplated" in low and tem_cor) else 0)
         if pts > melhor_pts:
             melhor, melhor_pts, sem_fundo = caminho, pts, "altform-unplated" in low
     if not melhor:
@@ -1015,22 +1038,30 @@ def montar_icone_store(pasta, logo, cor, chave):
     img = QPixmap(melhor)
     if img.isNull():
         return None
+    img = _recortar_margens(img)
     pix = QPixmap(128, 128)
     pix.fill(Qt.transparent)
     p = QPainter(pix)
     p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-    if sem_fundo:
-        c = QColor(cor) if cor else QColor()
-        if not c.isValid() or c.alpha() == 0:
-            c = QColor(45, 45, 55)
+    if sem_fundo and tem_cor:
         p.setPen(Qt.NoPen)
         p.setBrush(c)
         p.drawRoundedRect(QRectF(4, 4, 120, 120), 28, 28)
         lado = 84
     else:
-        lado = 120
+        lado = 120                                    # o proprio logo ja e o icone: sem placa cinza atras
     esc = img.scaled(lado, lado, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    p.drawPixmap((128 - esc.width()) // 2, (128 - esc.height()) // 2, esc)
+    x, y = (128 - esc.width()) / 2.0, (128 - esc.height()) / 2.0
+    if not (sem_fundo and tem_cor):
+        try:
+            im = esc.toImage()
+            if im.pixelColor(0, 0).alpha() > 200 and im.pixelColor(im.width() - 1, im.height() - 1).alpha() > 200:
+                recorte = QPainterPath()              # logo quadrado e opaco: arredonda os cantos
+                recorte.addRoundedRect(QRectF(x, y, esc.width(), esc.height()), lado * 0.22, lado * 0.22)
+                p.setClipPath(recorte)
+        except Exception:
+            pass
+    p.drawPixmap(int(round(x)), int(round(y)), esc)
     p.end()
     try:
         os.makedirs(PASTA_ICONES_STORE, exist_ok=True)
@@ -1285,6 +1316,13 @@ def pix_para(caminho, hwnd=None):
 
 
 def pix_item(d):
+    exe = d.get("exe") or ""
+    if d.get("icone") and "\\windowsapps\\" in exe.lower():
+        chave = "msix:" + exe
+        if chave not in CACHE_ICONES:
+            CACHE_ICONES[chave] = pix_msix(exe)              # refeito a cada abertura: pega melhorias de icone
+        if CACHE_ICONES[chave] is not None:
+            return CACHE_ICONES[chave]
     ic = d.get("icone")
     if ic and os.path.exists(ic):
         if ic not in CACHE_ICONES:
