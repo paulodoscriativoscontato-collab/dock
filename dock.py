@@ -66,7 +66,7 @@ LIMIAR_ARRASTO = 6   # pixels que o mouse precisa andar para comecar a arrastar
 PROGRAMAS = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs"
 USUARIO = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
 
-VERSAO = "1.0.12"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
+VERSAO = "1.0.13"                 # suba este numero a cada atualizacao (a tag do GitHub tem que ser igual: v1.0.1...)
 GITHUB_REPO = "paulodoscriativoscontato-collab/dock"                 # "seu-usuario/Dock": de onde a dock baixa as atualizacoes (vazio = sem atualizacao)
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
@@ -485,7 +485,7 @@ def deve_esconder_dock(dock_rect, dock_hwnd):
             return False
         pid = pid_da_janela(hwnd)
         if pid == os.getpid():
-            return False
+            return None       # janela da propria dock (menu/previa): quem chama mantem o estado atual
         exe = exe_do_pid(pid)
         if exe and os.path.basename(exe).lower() in EXES_SHELL:
             return False
@@ -3224,9 +3224,18 @@ class Dock(QWidget):
         if agora - self._t_fs > 0.15:
             self._t_fs = agora
             if AUTO_OCULTAR and OCULTAR_QUANDO != "nunca":
-                self.tela_cheia = deve_esconder_dock(self.retangulo_fisico_barra(), int(self.winId()))
+                novo = deve_esconder_dock(self.retangulo_fisico_barra(), int(self.winId()))
             else:
-                self.tela_cheia = False
+                novo = False
+            if novo is None:
+                novo = self.tela_cheia
+            if novo == self.tela_cheia:
+                self._fs_cand = 0
+            else:
+                self._fs_cand = getattr(self, "_fs_cand", 0) + 1
+                if self._fs_cand >= 2:          # so troca se o novo estado se repetir (evita piscar)
+                    self.tela_cheia = novo
+                    self._fs_cand = 0
 
         if not self.tela_cheia:
             self.revelada = False
@@ -3235,10 +3244,12 @@ class Dock(QWidget):
         else:
             pos = QCursor.pos()
             geom = self.tela.geometry()
+            na_borda = (pos.y() >= geom.bottom() - 1 and geom.left() <= pos.x() <= geom.right())
             if self.revelada:
                 sobre_previa = self.previa.isVisible() and self.previa.frameGeometry().contains(pos)
                 if (self.area_dock().contains(pos) or sobre_previa or self.menu_aberto
-                        or self.arrastando >= 0 or agora < self._manter_ate or self.pilha.isVisible()):
+                        or self.arrastando >= 0 or agora < self._manter_ate or self.pilha.isVisible()
+                        or na_borda):             # mouse parado na borda: a dock fica, em vez de subir e descer
                     self._t_fora = None
                 elif self._t_fora is None:
                     self._t_fora = agora
@@ -3246,7 +3257,6 @@ class Dock(QWidget):
                     self.revelada = False
                     self._t_fora = None
             else:
-                na_borda = (pos.y() >= geom.bottom() - 1 and geom.left() <= pos.x() <= geom.right())
                 if na_borda:
                     if self._t_borda is None:
                         self._t_borda = agora
